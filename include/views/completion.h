@@ -3,7 +3,6 @@
 #include "datastructures/singlelinetextarea.h"
 #include "definitions/vimmode.h"
 #include "datastructures/fileconfig.h"
-#include "SDL2/SDL_events.h"
 
 struct CompletionView {
     // TODO: rename to LspNonblockingResponse
@@ -34,6 +33,6 @@ struct CompletionView {
 bool completionWhenQuit(CompletionView* view);
 bool completionWhenSelected(CompletionView* view);
 void completionOpen(CompletionView* view, VimMode previous_state, FileConfig* f);
-void completionHandleInput(CompletionView* view, const SDL_Event &e);
+void completionHandleInput(CompletionView* view, int c);
 void completionTickPostKeypress(FileConfig* f, CompletionView* view);
 void completionDraw(CompletionView* view);

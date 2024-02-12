@@ -1,6 +1,6 @@
 #pragma once
 #include <vector>
-#include "assert.h"
+#include "mathutil.h"
 
 template <typename T>
 struct Zipper {

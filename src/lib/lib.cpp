@@ -4,18 +4,23 @@
 #include <algorithm>
 #include <assert.h>
 #include <ctype.h>
-#include <fstream>
-#include <iostream>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <iostream>
 #include <iterator>
+#include <libgen.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/ttydefaults.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <unistd.h>
 #include "views/tilde.h"
 #include "algorithms/getfilepathamongstparents.h"
 #include "algorithms/appendcolwithcursor.h"
@@ -24,12 +29,6 @@
 #include "definitions/keyevent.h"
 #include "datastructures/editorconfig.h"
 #include "definitions/escapecode.h"
-#include "imgui/imgui.h"
-
-#ifdef WIN32
-#include <windows.h>
-#endif
-
 // TODO: show lake path in messages tab.
 // TODO: add a new view for running `lake build`.
 
@@ -65,8 +64,8 @@ void _exec_lean_server_on_child(std::optional<fs::path> lakefile_dirpath,
     if (!lakefile_dirpath) {
         fprintf(stderr, "starting 'lean --server'...\n");
         const char* process_name = "lean";
-        char* const argv[] = { strdup(process_name), strdup("--server"), NULL };
-        failure = subprocess_create(NULL, argv, subprocess_options, subprocess);
+        const char * const argv[] = { strdup(process_name), strdup("--server"), NULL };
+        failure = subprocess_create(/*cwd=*/NULL, argv, subprocess_options, subprocess);
     } else {
         std::error_code ec;
         fs::current_path(*lakefile_dirpath, ec);
@@ -74,8 +73,8 @@ void _exec_lean_server_on_child(std::optional<fs::path> lakefile_dirpath,
             die("ERROR: unable to switch to 'lakefile.lean' directory");
         };
         const char* process_name = "lake";
-        char* const argv[] = { strdup(process_name), strdup("serve"), NULL };
-        failure = subprocess_create(NULL, argv, subprocess_options, subprocess);
+        const char* const argv[] = { strdup(process_name), strdup("serve"), NULL };
+        failure = subprocess_create(/*cwd=*/NULL, argv, subprocess_options, subprocess);
 
     }
 
@@ -124,7 +123,7 @@ struct LspResponse {
 
 int LeanServerState::_write_str_to_child(const char* buf, int len) const
 {
-    int nwritten = fwrite(buf, 1, len, subprocess_stdin(&this->process));
+    int nwritten = write(fileno(subprocess_stdin(&this->process)), buf, len);
     return nwritten;
 };
 
@@ -132,7 +131,7 @@ int LeanServerState::_read_stdout_str_from_child_nonblocking()
 {
     const int BUFSIZE = 4096;
     char buf[BUFSIZE];
-    int nread = subprocess_read_stdout_async(&this->process, buf, BUFSIZE);
+    int nread = subprocess_read_stdout_sync(&this->process, buf, BUFSIZE);
     // int nread = read(this->child_stdout_to_parent_buffer[PIPE_READ_IX], buf, BUFSIZE);
     if (nread == -1) {
 
@@ -292,7 +291,6 @@ void die(const char* fmt, ...)
 void disableRawMode()
 {
     // show hidden cursor
-#ifndef _WIN32
     const char* showCursor = "\x1b[?25h";
     // no point catching errors at this state, we are closing soon anyway.
     int _ = write(STDOUT_FILENO, showCursor, strlen(showCursor));
@@ -300,12 +298,10 @@ void disableRawMode()
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_editor.orig_termios) == -1) {
         die("tcsetattr");
     }
-#endif
 }
 
 void enableRawMode()
 {
-#ifndef _WIN32
     if (tcgetattr(STDIN_FILENO, &g_editor.orig_termios) == -1) {
         die("tcgetattr");
     };
@@ -346,12 +342,10 @@ void enableRawMode()
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
         die("tcsetattr");
     }
-#endif
 }
 
 void getCursorPosition(int* rows, int* cols)
 {
-#ifndef _WIN32
     char buf[32];
     unsigned int i = 0;
     // n: terminal status | 6: cursor position
@@ -379,13 +373,13 @@ void getCursorPosition(int* rows, int* cols)
     if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) {
         die("unable to parse cursor string");
     };
-#endif
 }
 
 int getWindowSize(int* rows, int* cols)
 {
 
-#ifndef _WIN32
+    // getCursorPosition(rows, cols);
+
     struct winsize ws;
     // TIOCGWINSZ: terminal IOctl get window size.
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
@@ -397,8 +391,6 @@ int getWindowSize(int* rows, int* cols)
         // fprintf(stderr, "cols: %d | rows: %d\n", *cols, *rows);
         // die("foo");
     }
-    return 0;
-#endif
     return 0;
 }
 
@@ -676,28 +668,28 @@ void fileConfigRequestGoalState(FileConfig* file_config)
 }
 
 /*** file i/o ***/
-FileConfig::FileConfig(FileLocation loc) {
+FileConfig::FileConfig(FileLocation loc)
+{
     this->cursor = loc.cursor;
     this->absolute_filepath = loc.absolute_filepath;
     assert(this->absolute_filepath.is_absolute());
-
-    std::ifstream file(this->absolute_filepath.string());
-    if (!file.is_open()) {
-        die("ifstream: unable to open file '%s'",
-            this->absolute_filepath.c_str());
+    FILE* fp = fopen(this->absolute_filepath.c_str(), "a+");
+    if (!fp) {
+        die("fopen: unable to open file '%s'", this->absolute_filepath.c_str());
     }
+    fseek(fp, 0, /*whence=*/SEEK_SET);
 
-    std::string line;
-    while (std::getline(file, line)) {
-        // Remove trailing newline or carriage return characters
-        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
-            line.pop_back();
+    char* line = nullptr;
+    size_t linecap = 0; // allocate memory for line read.
+    ssize_t linelen = -1;
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
+        while (linelen > 0 && (line[linelen - 1] == '\n' || line[linelen - 1] == '\r')) {
+            linelen--;
         }
-        fileConfigInsertRowBefore(this, this->rows.size(), line.c_str(),
-                                  line.length());
+        fileConfigInsertRowBefore(this, this->rows.size(), line, linelen);
     }
-
-    file.close();
+    free(line);
+    fclose(fp);
 }
 
 void fileConfigRowsToBuf(FileConfig* file, abuf* buf)
@@ -756,10 +748,21 @@ void fileConfigSave(FileConfig* f)
 
     abuf buf;
     fileConfigRowsToBuf(f, &buf);
-    FILE *fp  = fopen(f->absolute_filepath.string().c_str(), "w");
-    int nwritten = fwrite(buf.buf(), 1, buf.len(), fp);
+    // | open for read and write
+    // | create if does not exist
+    // 0644: +r, +w
+    int fd = open(f->absolute_filepath.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd != -1) {
+        // editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+    }
+    assert(fd != -1 && "unable to open file");
+    // | set file to len.
+    int err = ftruncate(fd, buf.len());
+    assert(err != -1 && "unable to truncate");
+    int nwritten = write(fd, buf.buf(), buf.len());
     assert(nwritten == buf.len() && "wasn't able to write enough bytes");
-    fclose(fp);
+    // editorSetStatusMessage("Saved file");
+    close(fd);
 }
 
 LspPosition cursorToLspPosition(const Cursor c)
@@ -867,146 +870,144 @@ const char* LspDiagnosticSeverityToColor(LspDiagnosticSeverity s)
 
 void fileConfigDraw(FileConfig* f)
 {
+    f->cursor_render_col = 0;
+    assert(f->cursor.row >= 0 && f->cursor.row <= f->rows.size());
+    if (f->cursor.row < f->rows.size()) {
+        f->cursor_render_col = f->rows[f->cursor.row].cxToRx(Size<Codepoint>(f->cursor.col));
+    }
+    if (f->cursor.row < f->scroll_row_offset) {
+        f->scroll_row_offset = f->cursor.row;
+    }
+    if (f->cursor.row >= f->scroll_row_offset + g_editor.screenrows) {
+        f->scroll_row_offset = f->cursor.row - g_editor.screenrows + 1;
+    }
+    if (f->cursor_render_col < f->scroll_col_offset) {
+        f->scroll_col_offset = f->cursor_render_col;
+    }
+    if (f->cursor_render_col >= f->scroll_col_offset + g_editor.screencols) {
+        f->scroll_col_offset = f->cursor_render_col - g_editor.screencols + 1;
+    }
 
-    ImGui::Begin(f->absolute_filepath.string().c_str(), nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-    ImGui::End();
-    // f->cursor_render_col = 0;
-    // assert(f->cursor.row >= 0 && f->cursor.row <= f->rows.size());
-    // if (f->cursor.row < f->rows.size()) {
-    //     f->cursor_render_col = f->rows[f->cursor.row].cxToRx(Size<Codepoint>(f->cursor.col));
-    // }
-    // if (f->cursor.row < f->scroll_row_offset) {
-    //     f->scroll_row_offset = f->cursor.row;
-    // }
-    // if (f->cursor.row >= f->scroll_row_offset + g_editor.screenrows) {
-    //     f->scroll_row_offset = f->cursor.row - g_editor.screenrows + 1;
-    // }
-    // if (f->cursor_render_col < f->scroll_col_offset) {
-    //     f->scroll_col_offset = f->cursor_render_col;
-    // }
-    // if (f->cursor_render_col >= f->scroll_col_offset + g_editor.screencols) {
-    //     f->scroll_col_offset = f->cursor_render_col - g_editor.screencols + 1;
-    // }
+    abuf ab;
+    ab.appendstr("\x1b[?25l"); // hide cursor
 
-    // abuf ab;
-    // ab.appendstr("\x1b[?25l"); // hide cursor
+    // VT100 escapes.
+    // \x1b: escape.
+    // J: erase in display.
+    // [2J: clear entire screen
+    // trivia: [0J: clear screen from top to cuursor, [1J: clear screen from
+    // cursor to bottom
+    //          0 is default arg, so [J: clear screen from cursor to bottom
+    ab.appendstr("\x1b[2J");
 
-    // // VT100 escapes.
-    // // \x1b: escape.
-    // // J: erase in display.
-    // // [2J: clear entire screen
-    // // trivia: [0J: clear screen from top to cuursor, [1J: clear screen from
-    // // cursor to bottom
-    // //          0 is default arg, so [J: clear screen from cursor to bottom
-    // ab.appendstr("\x1b[2J");
+    // H: cursor position
+    // [<row>;<col>H   (args separated by ;).
+    // Default arguments for H is 1, so it's as if we had sent [1;1H
+    ab.appendstr("\x1b[1;1H");
 
-    // // H: cursor position
-    // // [<row>;<col>H   (args separated by ;).
-    // // Default arguments for H is 1, so it's as if we had sent [1;1H
-    // ab.appendstr("\x1b[1;1H");
+    // When we print the line number, tilde, we then print a
+    // "\r\n" like on any other line, but this causes the terminal to scroll in
+    // order to make room for a new, blank line. Let’s make the last line an
+    // exception when we print our
+    // "\r\n".
+    // plus one at the end for the pipe, and +1 on the num_digits so we start from '1'.
+    // plus one more for the progress bar character
+    const int NCHARS_PIPE = 1;
+    const int NCHARS_PROGRESSBAR = 1;
+    const int LINE_NUMBER_NUM_CHARS = num_digits(g_editor.screenrows + f->scroll_row_offset + NCHARS_PIPE + NCHARS_PROGRESSBAR) + 1;
+    for (int row = 0; row < g_editor.screenrows; row++) {
+        int filerow = row + f->scroll_row_offset;
 
-    // // When we print the line number, tilde, we then print a
-    // // "\r\n" like on any other line, but this causes the terminal to scroll in
-    // // order to make room for a new, blank line. Let’s make the last line an
-    // // exception when we print our
-    // // "\r\n".
-    // // plus one at the end for the pipe, and +1 on the num_digits so we start from '1'.
-    // // plus one more for the progress bar character
-    // const int NCHARS_PIPE = 1;
-    // const int NCHARS_PROGRESSBAR = 1;
-    // const int LINE_NUMBER_NUM_CHARS = num_digits(g_editor.screenrows + f->scroll_row_offset + NCHARS_PIPE + NCHARS_PROGRESSBAR) + 1;
-    // for (int row = 0; row < g_editor.screenrows; row++) {
-    //     int filerow = row + f->scroll_row_offset;
+        // convert the line number into a string, and write it.
+        {
 
-    //     // convert the line number into a string, and write it.
-    //     {
+            char* line_number_str = (char*)calloc(sizeof(char), (LINE_NUMBER_NUM_CHARS + 1)); // TODO: allocate once.
+            if (f->lean_server_state.initialized != LeanServerInitializedKind::Initialized) {
+                ab.appendstr(ESCAPE_CODE_GRAY "▌" ESCAPE_CODE_UNSET);
+            } else if (f->isLeanSyncDirty()) {
+                ab.appendstr(ESCAPE_CODE_WHITE "▌" ESCAPE_CODE_UNSET);
+            } else {
+                if (filerow < f->progressbar.startRow || f->progressbar.finished) {
+                    ab.appendstr(ESCAPE_CODE_GREEN "▌" ESCAPE_CODE_UNSET);
+                } else {
+                    ab.appendstr(ESCAPE_CODE_YELLOW "▌" ESCAPE_CODE_UNSET);
+                }
+            }
+            bool row_needs_unset = false;
+            if (filerow == f->cursor.row) {
+                ab.appendstr(ESCAPE_CODE_CURSOR_SELECT);
+                row_needs_unset = true;
+            }
+            // code in view mode is renderered gray
+            else if (g_editor.vim_mode == VM_NORMAL) {
+                ab.appendstr(ESCAPE_CODE_DULL);
+                row_needs_unset = true;
+            }
 
-    //         char* line_number_str = (char*)calloc(sizeof(char), (LINE_NUMBER_NUM_CHARS + 1)); // TODO: allocate once.
-    //         if (f->lean_server_state.initialized != LeanServerInitializedKind::Initialized) {
-    //             ab.appendstr(ESCAPE_CODE_GRAY "▌" ESCAPE_CODE_UNSET);
-    //         } else if (f->isLeanSyncDirty()) {
-    //             ab.appendstr(ESCAPE_CODE_WHITE "▌" ESCAPE_CODE_UNSET);
-    //         } else {
-    //             if (filerow < f->progressbar.startRow || f->progressbar.finished) {
-    //                 ab.appendstr(ESCAPE_CODE_GREEN "▌" ESCAPE_CODE_UNSET);
-    //             } else {
-    //                 ab.appendstr(ESCAPE_CODE_YELLOW "▌" ESCAPE_CODE_UNSET);
-    //             }
-    //         }
-    //         bool row_needs_unset = false;
-    //         if (filerow == f->cursor.row) {
-    //             ab.appendstr(ESCAPE_CODE_CURSOR_SELECT);
-    //             row_needs_unset = true;
-    //         }
-    //         // code in view mode is renderered gray
-    //         else if (g_editor.vim_mode == VM_NORMAL) {
-    //             ab.appendstr(ESCAPE_CODE_DULL);
-    //             row_needs_unset = true;
-    //         }
+            if (!f->isLeanSyncDirty()) { // only draw diagonstics if lean state is sync'd.
+                for (const LspDiagnostic& d : f->lspDiagnostics) {
+                    if (d.range.start.row >= filerow && d.range.end.row <= filerow) {
+                        row_needs_unset = true;
+                        ab.appendstr(LspDiagnosticSeverityToColor(d.severity));
+                    }
+                }
+            }
 
-    //         if (!f->isLeanSyncDirty()) { // only draw diagonstics if lean state is sync'd.
-    //             for (const LspDiagnostic& d : f->lspDiagnostics) {
-    //                 if (d.range.start.row >= filerow && d.range.end.row <= filerow) {
-    //                     row_needs_unset = true;
-    //                     ab.appendstr(LspDiagnosticSeverityToColor(d.severity));
-    //                 }
-    //             }
-    //         }
+            int ix = write_int_to_str(line_number_str, filerow + 1);
+            while (ix < LINE_NUMBER_NUM_CHARS - 1) {
+                line_number_str[ix] = ' ';
+                ix++;
+            }
+            line_number_str[ix] = '|';
+            ab.appendstr(line_number_str);
+            free(line_number_str);
 
-    //         int ix = write_int_to_str(line_number_str, filerow + 1);
-    //         while (ix < LINE_NUMBER_NUM_CHARS - 1) {
-    //             line_number_str[ix] = ' ';
-    //             ix++;
-    //         }
-    //         line_number_str[ix] = '|';
-    //         ab.appendstr(line_number_str);
-    //         free(line_number_str);
+            // code in view mode is renderered gray, so reset.
+            if (row_needs_unset) {
+                ab.appendstr(ESCAPE_CODE_UNSET);
+            }
+        }
+        // code in view mode is renderered gray
+        if (g_editor.vim_mode == VM_NORMAL) {
+            ab.appendstr("\x1b[37;40m");
+        }
 
-    //         // code in view mode is renderered gray, so reset.
-    //         if (row_needs_unset) {
-    //             ab.appendstr(ESCAPE_CODE_UNSET);
-    //         }
-    //     }
-    //     // code in view mode is renderered gray
-    //     if (g_editor.vim_mode == VM_NORMAL) {
-    //         ab.appendstr("\x1b[37;40m");
-    //     }
+        const TextAreaMode textAreaMode = g_editor.vim_mode == VM_NORMAL ? TextAreaMode::TAM_Normal : TAM_Insert;
 
-    //     const TextAreaMode textAreaMode = g_editor.vim_mode == VM_NORMAL ? TextAreaMode::TAM_Normal : TAM_Insert;
+        if (filerow < f->rows.size()) {
+            const abuf& row = f->rows[filerow];
+            const Size<Codepoint> NCOLS = clampu<Size<Codepoint>>(row.ncodepoints(), g_editor.screencols - LINE_NUMBER_NUM_CHARS - 1);
+            assert(g_editor.vim_mode == VM_NORMAL || g_editor.vim_mode == VM_INSERT);
 
-    //     if (filerow < f->rows.size()) {
-    //         const abuf& row = f->rows[filerow];
-    //         const Size<Codepoint> NCOLS = clampu<Size<Codepoint>>(row.ncodepoints(), g_editor.screencols - LINE_NUMBER_NUM_CHARS - 1);
-    //         assert(g_editor.vim_mode == VM_NORMAL || g_editor.vim_mode == VM_INSERT);
+            if (filerow == f->cursor.row) {
+                for (Size<Codepoint> i(0); i <= NCOLS; ++i) {
+                    appendColWithCursor(&ab, &row, i, f->cursor.col, textAreaMode);
+                }
+            } else {
+                for (Ix<Codepoint> i(0); i < NCOLS; ++i) {
+                    ab.appendCodepoint(row.getCodepoint(i));
+                }
+            }
+        } else if (filerow == f->rows.size() && f->cursor.row == filerow) {
+            abufAppendCodepointWithCursor(&ab, textAreaMode, " ");
+        } else {
+            ab.appendstr("~");
+        }
 
-    //         if (filerow == f->cursor.row) {
-    //             for (Size<Codepoint> i(0); i <= NCOLS; ++i) {
-    //                 appendColWithCursor(&ab, &row, i, f->cursor.col, textAreaMode);
-    //             }
-    //         } else {
-    //             for (Ix<Codepoint> i(0); i < NCOLS; ++i) {
-    //                 ab.appendCodepoint(row.getCodepoint(i));
-    //             }
-    //         }
-    //     } else if (filerow == f->rows.size() && f->cursor.row == filerow) {
-    //         abufAppendCodepointWithCursor(&ab, textAreaMode, " ");
-    //     } else {
-    //         ab.appendstr("~");
-    //     }
+        if (g_editor.vim_mode == VM_NORMAL) {
+            ab.appendstr("\x1b[0m");
+        }
 
-    //     if (g_editor.vim_mode == VM_NORMAL) {
-    //         ab.appendstr("\x1b[0m");
-    //     }
+        // The K command (Erase In Line) erases part of the current line.
+        // by default, arg is 0, which erases everything to the right of the
+        // cursor.
+        ab.appendstr("\x1b[K");
 
-    //     // The K command (Erase In Line) erases part of the current line.
-    //     // by default, arg is 0, which erases everything to the right of the
-    //     // cursor.
-    //     ab.appendstr("\x1b[K");
-
-    //     // always append a space, since we decrement a row from screen rows
-    //     // to make space for status bar.
-    //     ab.appendstr("\r\n");
-    // }
+        // always append a space, since we decrement a row from screen rows
+        // to make space for status bar.
+        ab.appendstr("\r\n");
+    }
+    CHECK_POSIX_CALL_M1(write(STDOUT_FILENO, ab.buf(), ab.len()));
 }
 
 void drawCallback(std::function<void(abuf& ab)> f)
@@ -1016,9 +1017,7 @@ void drawCallback(std::function<void(abuf& ab)> f)
     ab.appendstr("\x1b[2J"); // J: erase in display.
     ab.appendstr("\x1b[1;1H"); // H: cursor position
     f(ab);
-#ifndef WIN32
     CHECK_POSIX_CALL_M1(write(STDOUT_FILENO, ab.buf(), ab.len()));
-#endif
 }
 
 void editorDrawFileConfigPopup(FileConfig* f)
@@ -1071,10 +1070,7 @@ void editorDrawInfoViewGoal(abuf* ab, const char* str)
             // grab the substring and print out out.
             assert(line_end < len && str[line_end] == '\n');
             const int substr_len = line_end - line_begin; // half open interval [line_begin, line_end)
-            char* substr = (char *)calloc(sizeof(char), substr_len + 1);
-            for (int i = 0; i < substr_len; ++i) {
-                substr[i] = str[line_begin + i];
-            }
+            char* substr = strndup(str + line_begin, substr_len);
             ab->appendfmtstr(120, "%s%s\x1b[K \r\n", INDENT_STR, substr);
             free(substr);
         }
@@ -1211,9 +1207,7 @@ void editorDrawInfoViewTacticsTab(FileConfig* f)
     // to make space for status bar.
     ab.appendstr("\r\n");
 
-#ifndef WIN32
     CHECK_POSIX_CALL_M1(write(STDOUT_FILENO, ab.buf(), ab.len()));
-#endif
 }
 
 void editorDrawInfoViewMessagesTab(FileConfig* f)
@@ -1243,9 +1237,7 @@ void editorDrawInfoViewMessagesTab(FileConfig* f)
 
     ab.appendstr("\x1b[K"); // The K command (Erase In Line) erases part of the current line.
     ab.appendstr("\r\n"); // always append a space
-#ifndef WIN32
     CHECK_POSIX_CALL_M1(write(STDOUT_FILENO, ab.buf(), ab.len()));
-#endif
 }
 
 void editorDrawInfoViewHoverTab(FileConfig* f)
@@ -1300,9 +1292,7 @@ void editorDrawInfoViewHoverTab(FileConfig* f)
         } // end else 'result != nullptr.
     } while (0);
 
-#ifndef WIN32
     CHECK_POSIX_CALL_M1(write(STDOUT_FILENO, ab.buf(), ab.len()));
-#endif
 }
 
 InfoViewTab _infoViewTabCycleDelta(FileConfig* f, InfoViewTab t, int delta)
@@ -1353,32 +1343,14 @@ void editorDrawNoFile()
     // Default arguments for H is 1, so it's as if we had sent [1;1H
     ab.appendstr("\x1b[1;1H");
     ab.appendstr("We will know . We must know ~ David Hilbert.\r\n");
-#ifndef WIN32
     CHECK_POSIX_CALL_M1(write(STDOUT_FILENO, ab.buf(), ab.len()));
-#endif
 }
 
 void editorDraw()
 {
-
-    if (ctrlpDraw(&g_editor.ctrlp)) {
-        if (ctrlpWhenSelected(&g_editor.ctrlp)) {
-            g_editor.getOrOpenNewFile(ctrlpGetSelectedFileLocation(&g_editor.ctrlp));
-            g_editor.vim_mode = VM_NORMAL;
-        }
-    }
-    // draw the current file.
     if (g_editor.vim_mode == VM_NORMAL || g_editor.vim_mode == VM_INSERT) {
         if (g_editor.curFile()) {
             fileConfigDraw(g_editor.curFile());
-        } else {
-            editorDrawNoFile();
-        }
-    }
-    /*
-    if (g_editor.vim_mode == VM_NORMAL || g_editor.vim_mode == VM_INSERT) {
-        if (g_editor.curFile()) {
-            fileconfigdraw(g_editor.curfile());
         } else {
             editorDrawNoFile();
         }
@@ -1396,7 +1368,6 @@ void editorDraw()
         assert(g_editor.curFile() != NULL);
         editorDrawInfoView(g_editor.curFile());
     }
-    */
 }
 
 /*** input ***/
@@ -1628,7 +1599,6 @@ void fileConfigMoveCursor(FileConfig* f, int key)
 
 int editorReadRawEscapeSequence()
 {
-#ifndef WIN32
     int nread;
     char c;
     if ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
@@ -1684,8 +1654,6 @@ int editorReadRawEscapeSequence()
         return KEYEVENT_BACKSPACE;
     }
     return c;
-#endif
-    return 0;
 }
 
 // open row below ('o'.)
@@ -1756,8 +1724,7 @@ void editorHandleGotoResponse(json_object_ptr response)
     const char* uri = json_object_get_string(result0_uri);
     assert(result0_uri);
     const fs::path absolute_filepath = Uri::parse(uri);
-    tilde::tildeWrite("response [textDocument/gotoDefinition] result0_uri[filepath]: '%s'", 
-        absolute_filepath.string().c_str());
+    tilde::tildeWrite("response [textDocument/gotoDefinition] result0_uri[filepath]: '%s'", std::string(absolute_filepath).c_str());
     assert(absolute_filepath.is_absolute());
 
     json_object* result0_targetSelectionRange = nullptr;
@@ -1929,15 +1896,15 @@ void completionOpen(CompletionView* view, VimMode previous_state, FileConfig* f)
     g_editor.vim_mode = VM_COMPLETION;
 }
 
-void completionHandleInput(CompletionView* view, const SDL_Event &e)
+void completionHandleInput(CompletionView* view, int c)
 {
-    // if (c == CTRL_KEY('c') || c == '\\') {
-    //     view->quitPressed = false;
-    // } else if (c == CTRL_KEY('\r')) {
-    //     view->selectPressed = false;
-    // }
-    // // TODO: move the rest of the code into text area.
-    // assert(false && "unimplemented");
+    if (c == CTRL_KEY('c') || c == '\\') {
+        view->quitPressed = false;
+    } else if (c == CTRL_KEY('\r')) {
+        view->selectPressed = false;
+    }
+    // TODO: move the rest of the code into text area.
+    assert(false && "unimplemented");
 }
 
 void completionTickPostKeypress(FileConfig* f, CompletionView* view)
@@ -2020,40 +1987,38 @@ void completionDraw(CompletionView* view)
             ab.appendstr(ESCAPE_CODE_UNSET);
         }
     }
-#ifndef WIN32
     CHECK_POSIX_CALL_M1(write(STDOUT_FILENO, ab.buf(), ab.len()));
-#endif
 }
 
-
-void editorProcessKeypress(SDL_Event e)
+void editorProcessKeypress()
 {
+    int c = editorReadRawEscapeSequence();
+
     if (g_editor.vim_mode == VM_COMPLETION) {
-        if (e.type == SDL_KEYDOWN && e.key.keysym.mod & KMOD_CTRL && 
-            e.key.keysym.sym == SDLK_BACKSLASH || e.key.keysym.sym == SDLK_c) {
+        if (c == CTRL_KEY('\\') || c == CTRL_KEY('c')) {
             g_editor.vim_mode = VM_INSERT;
             return;
-        } else if (e.key.keysym.sym == SDLK_RETURN) {
+        } else if (c == '\r') {
             // TODO: make the completer accept the autocomplete.
             return;
-        } else {
+        } else if (isprint(c)) {
             // completionInsertChar(c);
             return;
         }
     } else if (g_editor.vim_mode == VM_TILDE) {
-        tilde::tildeHandleInput(&tilde::g_tilde, e);
+        tilde::tildeHandleInput(&tilde::g_tilde, c);
         if (tilde::tildeWhenQuit(&tilde::g_tilde)) {
             g_editor.vim_mode = VM_NORMAL;
             return;
         }
     } else if (g_editor.vim_mode == VM_COMPILE) {
-        compileView::compileViewHandleInput(&g_editor.compileView, e);
+        compileView::compileViewHandleInput(&g_editor.compileView, c);
         if (compileView::compileViewWhenQuit(&g_editor.compileView)) {
             g_editor.vim_mode = VM_NORMAL;
             return;
         }
     } else if (g_editor.vim_mode == VM_CTRLP) {
-        _ctrlpHandleInput(&g_editor.ctrlp);
+        ctrlpHandleInput(&g_editor.ctrlp, c);
         if (ctrlpWhenQuit(&g_editor.ctrlp)) {
             g_editor.vim_mode = g_editor.ctrlp.previous_state;
             return;
@@ -2064,7 +2029,7 @@ void editorProcessKeypress(SDL_Event e)
             return;
         }
     } else if (g_editor.vim_mode == VM_COMPLETION) {
-        completionHandleInput(&g_editor.completion, e);
+        completionHandleInput(&g_editor.completion, c);
         if (completionWhenQuit(&g_editor.completion)) {
             g_editor.vim_mode = g_editor.completion.previous_state;
             return;
@@ -2077,37 +2042,37 @@ void editorProcessKeypress(SDL_Event e)
     } else if (g_editor.vim_mode == VM_INFOVIEW_DISPLAY_GOAL) { // behaviours only in infoview mode
         assert(g_editor.curFile());
         FileConfig* f = g_editor.curFile();
-        // switch (e.key.keysym.sym) {
-        // case SDLK_h:
-        // case SDLK_j: {
-        //     f->infoViewTab = infoViewTabCyclePrevious(f, f->infoViewTab);
-        //     return;
-        // }
-        // case SDLK_l:
-        // case SDLK_k:
-        // case '\t': {
-        //     // TODO: this is not per file info? or is it?
-        //     f->infoViewTab = infoViewTabCycleNext(f, f->infoViewTab);
-        //     return;
-        // }
-        // case CTRL_KEY('c'):
-        // case CTRL_KEY('j'):
-        // case CTRL_KEY('k'): {
-        //     g_editor.vim_mode = VM_NORMAL;
-        //     return;
-        // }
-        // default: {
-        //     return;
-        // }
-        // }
+        switch (c) {
+        case 'h':
+        case 'j': {
+            f->infoViewTab = infoViewTabCyclePrevious(f, f->infoViewTab);
+            return;
+        }
+        case 'l':
+        case 'k':
+        case '\t': {
+            // TODO: this is not per file info? or is it?
+            f->infoViewTab = infoViewTabCycleNext(f, f->infoViewTab);
+            return;
+        }
+        case CTRL_KEY('c'):
+        case CTRL_KEY('j'):
+        case CTRL_KEY('k'): {
+            g_editor.vim_mode = VM_NORMAL;
+            return;
+        }
+        default: {
+            return;
+        }
+        }
     } else if (g_editor.vim_mode == VM_NORMAL) { // behaviours only in normal mode
         FileConfig* f = g_editor.curFile();
         if (f == nullptr) {
-            if (e.key.keysym.sym == SDLK_p && e.key.keysym.mod & KMOD_CTRL) {
+            if (c == CTRL_KEY('p')) {
                 ctrlpOpen(&g_editor.ctrlp, VM_NORMAL, g_editor.original_cwd);
-            } else if (e.key.keysym.sym == SDLK_q) {
+            } else if (c == 'q') {
                 exit(0);
-            } else if (e.key.keysym.sym == SDLK_BACKQUOTE) {
+            } else if (c == '`') {
                 tilde::tildeOpen(&tilde::g_tilde);
                 g_editor.vim_mode = VM_TILDE;
                 return;
@@ -2115,135 +2080,134 @@ void editorProcessKeypress(SDL_Event e)
             return;
         }
 
-        // normal mode.
         assert(f != nullptr);
-        // switch (c) {
-        // case CTRL_KEY('c'): { // resync state.
-        //     fileConfigSave(f);
-        //     fileConfigSyncLeanState(f);
-        //     return;
-        // }
-        // case '9':
-        // case CTRL_KEY('9'): {
-        //     compileView::compileViewOpen(&g_editor.compileView);
-        //     g_editor.vim_mode = VM_COMPILE;
-        // }
-        // case CTRL_KEY(']'): {
-        //     // goto definition.
-        //     // TODO: refactor this code. to force initialization first.
-        //     fileConfigGotoDefinitionNonblocking(g_editor.curFile(), GotoKind::Definition);
-        //     return;
-        // }
-        // case CTRL_KEY('['): { // is this a good choice of key? I am genuinely unsure.
-        //     // goto definition.
-        //     fileConfigGotoDefinitionNonblocking(g_editor.curFile(), GotoKind::TypeDefiition);
-        //     return;
-        // }
-        // case CTRL_KEY('o'): {
-        //     g_editor.undoFileMove();
-        //     return;
-        // }
-        // case CTRL_KEY('i'): {
-        //     g_editor.redoFileMove();
-        //     return;
-        // }
-        // case '`': {
-        //     tilde::tildeOpen(&tilde::g_tilde);
-        //     g_editor.vim_mode = VM_TILDE;
-        //     return;
-        // }
-        // case CTRL_KEY('p'): {
-        //     ctrlpOpen(&g_editor.ctrlp, VM_NORMAL, g_editor.original_cwd);
-        //     return;
-        // }
-        // case 'D': {
-        //     f->mkUndoMemento();
-        //     fileConfigDeleteTillEndOfRow(f);
-        //     return;
-        // }
-        // case 'q': {
-        //     fileConfigSave(f);
-        //     exit(0);
-        //     return;
-        // }
-        // case 'u': {
-        //     f->doUndo();
-        //     return;
-        // }
-        // case 'r':
-        // case 'U': {
-        //     f->doRedo();
-        //     return;
-        // }
-        // case 'x': {
-        //     f->mkUndoMemento();
-        //     fileConfigXCommand(f);
-        //     break;
-        // }
-        // case 'h':
-        // case 'j':
-        // case 'k':
-        // case 'l':
-        // case CTRL_KEY('d'):
-        // case CTRL_KEY('u'):
-        // case 'w':
-        // case 'b': {
-        //     fileConfigMoveCursor(f, c);
-        //     break;
-        // }
-        // case 'o': {
-        //     f->mkUndoMemento();
-        //     fileConfigOpenRowBelow(f);
-        //     g_editor.vim_mode = VM_INSERT;
-        //     return;
-        // }
-        // case 'O': {
-        //     f->mkUndoMemento();
-        //     fileConfigOpenRowAbove(f);
-        //     g_editor.vim_mode = VM_INSERT;
-        //     return;
-        // }
+        switch (c) {
+        case CTRL_KEY('c'): { // resync state.
+            fileConfigSave(f);
+            fileConfigSyncLeanState(f);
+            return;
+        }
+        case '9':
+        case CTRL_KEY('9'): {
+            compileView::compileViewOpen(&g_editor.compileView);
+            g_editor.vim_mode = VM_COMPILE;
+        }
+        case CTRL_KEY(']'): {
+            // goto definition.
+            // TODO: refactor this code. to force initialization first.
+            fileConfigGotoDefinitionNonblocking(g_editor.curFile(), GotoKind::Definition);
+            return;
+        }
+        case CTRL_KEY('['): { // is this a good choice of key? I am genuinely unsure.
+            // goto definition.
+            fileConfigGotoDefinitionNonblocking(g_editor.curFile(), GotoKind::TypeDefiition);
+            return;
+        }
+        case CTRL_KEY('o'): {
+            g_editor.undoFileMove();
+            return;
+        }
+        case CTRL_KEY('i'): {
+            g_editor.redoFileMove();
+            return;
+        }
+        case '`': {
+            tilde::tildeOpen(&tilde::g_tilde);
+            g_editor.vim_mode = VM_TILDE;
+            return;
+        }
+        case CTRL_KEY('p'): {
+            ctrlpOpen(&g_editor.ctrlp, VM_NORMAL, g_editor.original_cwd);
+            return;
+        }
+        case 'D': {
+            f->mkUndoMemento();
+            fileConfigDeleteTillEndOfRow(f);
+            return;
+        }
+        case 'q': {
+            fileConfigSave(f);
+            exit(0);
+            return;
+        }
+        case 'u': {
+            f->doUndo();
+            return;
+        }
+        case 'r':
+        case 'U': {
+            f->doRedo();
+            return;
+        }
+        case 'x': {
+            f->mkUndoMemento();
+            fileConfigXCommand(f);
+            break;
+        }
+        case 'h':
+        case 'j':
+        case 'k':
+        case 'l':
+        case CTRL_KEY('d'):
+        case CTRL_KEY('u'):
+        case 'w':
+        case 'b': {
+            fileConfigMoveCursor(f, c);
+            break;
+        }
+        case 'o': {
+            f->mkUndoMemento();
+            fileConfigOpenRowBelow(f);
+            g_editor.vim_mode = VM_INSERT;
+            return;
+        }
+        case 'O': {
+            f->mkUndoMemento();
+            fileConfigOpenRowAbove(f);
+            g_editor.vim_mode = VM_INSERT;
+            return;
+        }
 
-        // case 'a': {
-        //     f->mkUndoMemento();
-        //     fileConfigCursorMoveCharRightNoWraparound(f);
-        //     g_editor.vim_mode = VM_INSERT;
-        //     return;
-        // }
-        // case 'd': {
-        //     f->mkUndoMemento();
-        //     fileConfigDeleteCurrentRow(f);
-        //     return;
-        // }
-        // case '$': {
-        //     fileConfigCursorMoveEndOfRow(f);
-        //     return;
-        // }
-        // case '0': {
-        //     fileConfigCursorMoveBeginOfRow(f);
-        //     return;
-        // }
+        case 'a': {
+            f->mkUndoMemento();
+            fileConfigCursorMoveCharRightNoWraparound(f);
+            g_editor.vim_mode = VM_INSERT;
+            return;
+        }
+        case 'd': {
+            f->mkUndoMemento();
+            fileConfigDeleteCurrentRow(f);
+            return;
+        }
+        case '$': {
+            fileConfigCursorMoveEndOfRow(f);
+            return;
+        }
+        case '0': {
+            fileConfigCursorMoveBeginOfRow(f);
+            return;
+        }
 
-        // case CTRL_KEY('j'):
-        // case CTRL_KEY('k'): {
-        //     fileConfigRequestGoalState(f);
-        //     g_editor.vim_mode = VM_INFOVIEW_DISPLAY_GOAL;
-        //     return;
-        // }
-        // case 'i': {
-        //     f->mkUndoMemento();
-        //     g_editor.vim_mode = VM_INSERT;
-        //     return;
-        // }
-        // } // end switch over key.
+        case CTRL_KEY('j'):
+        case CTRL_KEY('k'): {
+            fileConfigRequestGoalState(f);
+            g_editor.vim_mode = VM_INFOVIEW_DISPLAY_GOAL;
+            return;
+        }
+        case 'i': {
+            f->mkUndoMemento();
+            g_editor.vim_mode = VM_INSERT;
+            return;
+        }
+        } // end switch over key.
     } // end mode == VM_NORMAL
     else {
         assert(g_editor.vim_mode == VM_INSERT);
         FileConfig* f = g_editor.curFile();
         if (f == nullptr) {
-            if (e.key.keysym.sym == SDLK_p && e.key.keysym.mod & KMOD_CTRL) {
+            if (c == CTRL_KEY('p')) {
                 ctrlpOpen(&g_editor.ctrlp, VM_INSERT, g_editor.original_cwd);
-            } else if (e.key.keysym.sym == SDLK_q) {
+            } else if (c == 'q') {
                 exit(0);
             }
             return;
@@ -2252,34 +2216,34 @@ void editorProcessKeypress(SDL_Event e)
         // make an undo memento every second.
         f->mkUndoMementoRecent();
 
-        // switch (c) { // behaviors only in edit mode.
-        // case CTRL_KEY('p'): {
-        //     ctrlpOpen(&g_editor.ctrlp, VM_INSERT, g_editor.original_cwd);
-        //     return;
-        // }
-        // case '\r':
-        //     fileConfigInsertEnterKey(f);
-        //     return;
-        // case KEYEVENT_BACKSPACE: { // this is backspace, apparently
-        //     fileConfigBackspace(f);
-        //     return;
-        // }
-        // case CTRL_KEY('\\'): {
-        //     completionOpen(&g_editor.completion, VM_INSERT, f);
-        //     return;
-        // }
-        // // when switching to normal mode, sync the lean state.
-        // case CTRL_KEY('c'): { // escape key
-        //     g_editor.vim_mode = VM_NORMAL;
-        //     fileConfigSave(f);
-        //     return;
-        // }
-        // default:
-        //     if (isprint(c)) {
-        //         fileConfigInsertCharBeforeCursor(f, c);
-        //         return;
-        //     }
-        // } // end switch case.
+        switch (c) { // behaviors only in edit mode.
+        case CTRL_KEY('p'): {
+            ctrlpOpen(&g_editor.ctrlp, VM_INSERT, g_editor.original_cwd);
+            return;
+        }
+        case '\r':
+            fileConfigInsertEnterKey(f);
+            return;
+        case KEYEVENT_BACKSPACE: { // this is backspace, apparently
+            fileConfigBackspace(f);
+            return;
+        }
+        case CTRL_KEY('\\'): {
+            completionOpen(&g_editor.completion, VM_INSERT, f);
+            return;
+        }
+        // when switching to normal mode, sync the lean state.
+        case CTRL_KEY('c'): { // escape key
+            g_editor.vim_mode = VM_NORMAL;
+            fileConfigSave(f);
+            return;
+        }
+        default:
+            if (isprint(c)) {
+                fileConfigInsertCharBeforeCursor(f, c);
+                return;
+            }
+        } // end switch case.
     } // end mode == VM_INSERT
 }
 
@@ -2287,11 +2251,14 @@ void editorProcessKeypress(SDL_Event e)
 
 void initEditor()
 {
+    if (getWindowSize(&g_editor.screenrows, &g_editor.screencols) == -1) {
+        die("getWindowSize");
+    };
+    static const int BOTTOM_INFO_PANE_HEIGHT = 2;
+    g_editor.screenrows -= BOTTOM_INFO_PANE_HEIGHT;
     fs::path abbrev_path = get_abbreviations_dict_path();
-    tilde::tildeWrite("loading abbreviations.json from '%s'", abbrev_path.string().c_str());
+    printf("[loading abbreviations.json from '%s']\n", abbrev_path.c_str());
     load_abbreviation_dict_from_file(&g_editor.abbrevDict, abbrev_path);
-    tilde::tildeWrite("#abbreviations loaded: '%d'",
-                      g_editor.abbrevDict.nrecords);
     assert(g_editor.abbrevDict.is_initialized);
 }
 
@@ -2436,7 +2403,6 @@ SuffixUnabbrevInfo abbrev_dict_get_unabbrev(AbbreviationDict* dict, const char* 
 // get the path to the executable, so we can build the path to resources.
 fs::path get_executable_path()
 {
-#ifndef WIN32
     const int BUFSIZE = 2048;
     char* buf = (char*)calloc(BUFSIZE, sizeof(char));
     const char* exe_path = "/proc/self/exe";
@@ -2448,22 +2414,12 @@ fs::path get_executable_path()
     fs::path out(buf);
     free(buf);
     return out;
-#else
-    static const int MAX_PATH_SIZE = 512;
-    char path[MAX_PATH_SIZE];
-    if (!GetModuleFileName(NULL, path, MAX_PATH_SIZE)) {
-        assert(false && "unable to get path of executable");
-    }
-    fs::path out(path);
-    return out;
-#endif
 }
 
 // get the path to `/path/to/exe/abbreviations.json`.
 fs::path get_abbreviations_dict_path()
 {
     fs::path exe_path = get_executable_path();
-    tilde::tildeWrite("executable path: '%s'", exe_path.string().c_str());
     fs::path exe_folder = exe_path.parent_path();
     // char *exe_folder = dirname(strdup(exe_path.c_str()));
     return exe_folder / "abbreviations.json";
@@ -2503,7 +2459,7 @@ void load_abbreviation_dict_from_json(AbbreviationDict* dict, json_object* o)
 // Load the abbreviation dictionary from the filesystem.
 void load_abbreviation_dict_from_file(AbbreviationDict* dict, fs::path abbrev_path)
 {
-    json_object* o = json_object_from_file(abbrev_path.string().c_str());
+    json_object* o = json_object_from_file(abbrev_path.c_str());
     if (o == NULL) {
         die("unable to load abbreviations from file '%s'.\n", abbrev_path.c_str());
     }
@@ -2524,26 +2480,26 @@ void compileViewOpen(CompileView* view)
     view->scrollback_ix = {};
 };
 
-void compileViewHandleInput(CompileView* view, const SDL_Event &e)
+void compileViewHandleInput(CompileView* view, int c)
 {
     const int NSCREENROWS = 20;
 
-    // if (c == CTRL_KEY('c') || c == CTRL_KEY('q') || c == 'q' || c == '`' || c == '~') {
-    //     view->quitPressed = true;
-    // } else if (c == CTRL_KEY('d')) {
-    //     view->scrollback_ix = clamp0u<int>(view->scrollback_ix + NSCREENROWS, view->log.size() - 1);
-    //     ;
-    // } else if (c == CTRL_KEY('u')) {
-    //     view->scrollback_ix = clamp0(view->scrollback_ix - NSCREENROWS);
-    // } else if (c == CTRL_KEY('p') || c == 'k') {
-    //     view->scrollback_ix = clamp0(view->scrollback_ix - 1);
-    // } else if (c == CTRL_KEY('n') || c == 'j') {
-    //     view->scrollback_ix = clampu<int>(view->scrollback_ix + 1, view->log.size() - 1);
-    // } else if (c == 'g') {
-    //     view->scrollback_ix = 0;
-    // } else if (c == 'G') {
-    //     view->scrollback_ix = view->log.size() - 1;
-    // }
+    if (c == CTRL_KEY('c') || c == CTRL_KEY('q') || c == 'q' || c == '`' || c == '~') {
+        view->quitPressed = true;
+    } else if (c == CTRL_KEY('d')) {
+        view->scrollback_ix = clamp0u<int>(view->scrollback_ix + NSCREENROWS, view->log.size() - 1);
+        ;
+    } else if (c == CTRL_KEY('u')) {
+        view->scrollback_ix = clamp0(view->scrollback_ix - NSCREENROWS);
+    } else if (c == CTRL_KEY('p') || c == 'k') {
+        view->scrollback_ix = clamp0(view->scrollback_ix - 1);
+    } else if (c == CTRL_KEY('n') || c == 'j') {
+        view->scrollback_ix = clampu<int>(view->scrollback_ix + 1, view->log.size() - 1);
+    } else if (c == 'g') {
+        view->scrollback_ix = 0;
+    } else if (c == 'G') {
+        view->scrollback_ix = view->log.size() - 1;
+    }
 }
 
 void compileViewDraw(CompileView* view)
@@ -2617,25 +2573,26 @@ void tildeOpen(TildeView* tilde)
     tilde->scrollback_ix = {};
 };
 
-void tildeHandleInput(TildeView* tilde, const SDL_Event &e) {
+void tildeHandleInput(TildeView* tilde, int c)
+{
     const int NSCREENROWS = 20;
 
-    // if (c == CTRL_KEY('c') || c == CTRL_KEY('q') || c == 'q' || c == '`' || c == '~') {
-    //     tilde->quitPressed = true;
-    // } else if (c == CTRL_KEY('d')) {
-    //     tilde->scrollback_ix = clamp0u<int>(tilde->scrollback_ix + NSCREENROWS, tilde->log.size() - 1);
-    //     ;
-    // } else if (c == CTRL_KEY('u')) {
-    //     tilde->scrollback_ix = clamp0(tilde->scrollback_ix - NSCREENROWS);
-    // } else if (c == CTRL_KEY('p') || c == 'k') {
-    //     tilde->scrollback_ix = clamp0(tilde->scrollback_ix - 1);
-    // } else if (c == CTRL_KEY('n') || c == 'j') {
-    //     tilde->scrollback_ix = clampu<int>(tilde->scrollback_ix + 1, tilde->log.size() - 1);
-    // } else if (c == 'g') {
-    //     tilde->scrollback_ix = 0;
-    // } else if (c == 'G') {
-    //     tilde->scrollback_ix = clamp0(tilde->log.size() - 1);
-    // }
+    if (c == CTRL_KEY('c') || c == CTRL_KEY('q') || c == 'q' || c == '`' || c == '~') {
+        tilde->quitPressed = true;
+    } else if (c == CTRL_KEY('d')) {
+        tilde->scrollback_ix = clamp0u<int>(tilde->scrollback_ix + NSCREENROWS, tilde->log.size() - 1);
+        ;
+    } else if (c == CTRL_KEY('u')) {
+        tilde->scrollback_ix = clamp0(tilde->scrollback_ix - NSCREENROWS);
+    } else if (c == CTRL_KEY('p') || c == 'k') {
+        tilde->scrollback_ix = clamp0(tilde->scrollback_ix - 1);
+    } else if (c == CTRL_KEY('n') || c == 'j') {
+        tilde->scrollback_ix = clampu<int>(tilde->scrollback_ix + 1, tilde->log.size() - 1);
+    } else if (c == 'g') {
+        tilde->scrollback_ix = 0;
+    } else if (c == 'G') {
+        tilde->scrollback_ix = clamp0(tilde->log.size() - 1);
+    }
 }
 
 void tildeDraw(TildeView* tilde)
@@ -2701,7 +2658,7 @@ void tildeDraw(TildeView* tilde)
 void tildeWrite(const char* fmt, ...)
 {
     if (!g_tilde.logfile) {
-        g_tilde.logfile = fopen("elide-stderr.txt", "w");
+        g_tilde.logfile = fopen("/tmp/elide-stderr", "w");
     }
     assert(g_tilde.logfile);
 

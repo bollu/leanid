@@ -7,7 +7,6 @@
 #include <vector>
 #include "subprocess/subprocess.h"
 #include "datastructures/filelocation.h"
-#include "SDL2/SDL_events.h"
 
 namespace fs = std::filesystem;
 
@@ -24,7 +23,7 @@ struct RgProcess {
     int selectedLine; // currently selected line. Bounds are `[0, lines.size())`
 
     // start the process, and run it asynchronously.
-    void execpAsync(std::string working_dir, std::vector<std::string> args);
+    void execpAsync(const char* working_dir, std::vector<std::string> args);
     // kills the process synchronously.
     void killSync();
 
@@ -99,6 +98,6 @@ bool ctrlpWhenSelected(CtrlPView* view);
 struct FileLocation;
 FileLocation ctrlpGetSelectedFileLocation(const CtrlPView* view);
 void ctrlpOpen(CtrlPView* view, VimMode previous_state, fs::path cwd);
-void _ctrlpHandleInput(CtrlPView* view);
+void ctrlpHandleInput(CtrlPView* view, int c);
 void ctrlpTickPostKeypress(CtrlPView* view);
-bool ctrlpDraw(CtrlPView* view);
+void ctrlpDraw(CtrlPView* view);

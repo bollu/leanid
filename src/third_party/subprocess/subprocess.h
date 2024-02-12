@@ -1079,6 +1079,7 @@ int subprocess_terminate(struct subprocess_s *const process) {
 }
 
 unsigned long subprocess_read_stdout_async(struct subprocess_s *const process, char *const buffer, unsigned size) {
+#if defined(_WIN32)
     unsigned long bytes_read = 0; // Ensure bytes_read is initialized
     void *handle = SUBPROCESS_PTR_CAST(void *, _get_osfhandle(_fileno(process->stdout_file)));
     struct subprocess_overlapped_s overlapped = {0, 0, {{0, 0}}, SUBPROCESS_NULL};
@@ -1097,6 +1098,18 @@ unsigned long subprocess_read_stdout_async(struct subprocess_s *const process, c
     }
   // ReadFile completed immediately
   return SUBPROCESS_CAST(unsigned long, bytes_read);
+#else 
+  const int fd = fileno(process->stdout_file);
+  const ssize_t bytes_read = read(fd, buffer, size);
+
+  if (bytes_read < 0) {
+    return 0;
+  }
+
+  return SUBPROCESS_CAST(unsigned, bytes_read);
+#endif
+
+  
 }
 
 unsigned subprocess_read_stdout_sync(struct subprocess_s *const process,

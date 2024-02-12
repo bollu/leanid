@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_CXX_STANDARD 17) 
 
 
-project(elide C CXX)
+project(elid C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,8 +22,8 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdiagnostics-color=always -O2")
 # https://stackoverflow.com/a/29316084/5305365 
 # find_package(PkgConfig REQUIRED)
 
-# libelide
-add_library(elidecore
+# libelid
+add_library(elidcore
   src/lean_lsp.cpp
   # src/lib/datastructures
   src/lib/datastructures/abuf.cpp
@@ -35,61 +35,37 @@ add_library(elidecore
   src/lib/uri_encode.cpp
   )
 
-# find_package(ssh CONFIG)
 find_package(json-c REQUIRED)
-find_package(SDL2 REQUIRED)
-find_package(OpenGL REQUIRED)
-find_package(libuv CONFIG REQUIRED)
 
-add_library(imgui
-  src/third_party/imgui/imgui.cpp
-  src/third_party/imgui/imgui_draw.cpp
-  src/third_party/imgui/imgui_tables.cpp
-  src/third_party/imgui/imgui_widgets.cpp
-  src/third_party/imgui/imgui_demo.cpp # TODO: do I need this?
-  src/third_party/imgui/backends/imgui_impl_sdl2.cpp
-  src/third_party/imgui/backends/imgui_impl_opengl3.cpp)
-target_include_directories(imgui PUBLIC src/third_party src/third_party/imgui/)
-target_link_libraries(imgui PUBLIC OpenGL::GL)
-# target_link_libraries(imgui PUBLIC SDL2::SDL2)
-target_link_libraries(imgui PUBLIC $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main> $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>)
+target_include_directories(elidcore PUBLIC json-c::json-c)
+target_include_directories(elidcore PUBLIC ssh)
+target_include_directories(elidcore PUBLIC include/)
+target_include_directories(elidcore PUBLIC src/third_party/)
+target_include_directories(elidcore PUBLIC src/third_party/subprocess)
 
-target_include_directories(elidecore PUBLIC json-c::json-c ssh)
-target_include_directories(elidecore PUBLIC include/)
-target_include_directories(elidecore PUBLIC src/third_party)
-target_include_directories(elidecore PUBLIC src/third_party/imgui/)
-target_include_directories(elidecore PUBLIC src/third_party/subprocess)
-target_link_libraries(elidecore PUBLIC json-c::json-c imgui)
-target_link_libraries(elidecore PRIVATE $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
-install(TARGETS elidecore DESTINATION lib)
+target_link_libraries(elidcore PUBLIC json-c::json-c)
+# target_link_libraries(elidcore PRIVATE $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
+install(TARGETS elidcore DESTINATION lib)
 
-# elide
-add_executable(elide src/main.cpp)
-target_link_libraries(elide PRIVATE elidecore)
+# elid
+add_executable(elid src/main.cpp)
+target_link_libraries(elid PRIVATE elidcore)
 
 if (WIN32)
     add_custom_command(
-        TARGET elide POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:SDL2::SDL2>" "$<TARGET_FILE_DIR:elide>"
+        TARGET elid POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:SDL2::SDL2>" "$<TARGET_FILE_DIR:elid>"
         VERBATIM
     )
 endif()
 
-install(TARGETS elide DESTINATION bin)
+install(TARGETS elid DESTINATION bin)
 
 # copy into install dir
-install(FILES  "$<TARGET_RUNTIME_DLLS:elide>" DESTINATION bin)
-install(FILES src/abbreviations.json DESTINATION bin)
-install(FILES resources/mononoki-Regular.ttf DESTINATION bin)
+install(FILES  "$<TARGET_RUNTIME_DLLS:elid>" DESTINATION bin)
 install(FILES "resources/Meslo LG S DZ Regular for Powerline.ttf" DESTINATION bin)
 
-# copy into build dir
-file(COPY src/abbreviations.json DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-file(COPY resources/mononoki-Regular.ttf DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-file(COPY "resources/Meslo LG S DZ Regular for Powerline.ttf" DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-
 add_subdirectory(test/)
-
 
 ## ASAN
 get_property(isMultiConfig GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)

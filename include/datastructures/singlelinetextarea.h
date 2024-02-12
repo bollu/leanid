@@ -3,7 +3,6 @@
 #include "datastructures/abuf.h"
 #include "definitions/textareamode.h"
 #include "mathutil.h"
-#include "SDL_events.h"
 
 struct SingleLineTextArea {
     TextAreaMode mode = TextAreaMode::TAM_Normal;
@@ -11,5 +10,4 @@ struct SingleLineTextArea {
     Size<Codepoint> col = 0;
 };
 
-void singleLineTextAreaDraw(SingleLineTextArea* area);
-void _singleLineTextAreaHandleInput(SingleLineTextArea* area);
+void SingleLineTextAreaHandleInput(SingleLineTextArea* area, int c);
