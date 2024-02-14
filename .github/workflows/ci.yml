@@ -1,3 +1,8 @@
+permissions:
+  contents: write
+
+on: [push]
+
 jobs:
   build:
     steps:
@@ -76,6 +81,15 @@ jobs:
           ## # to test.
           ## # This is useful to reduce the number of CMake's Presets you need in CMakePresets.json.
           ## testPresetAdditionalArgs: "['--config Release']"
+            #
+
+
+      - name: Release
+          uses: softprops/action-gh-release@v1
+          # if: startsWith(github.ref, 'refs/tags/')
+          with:
+            files: |
+              build/elid
 
      #  [OPTIONAL] Define the vcpkg's triplet you want to enforce, otherwise the default one
     #  for the hosting system will be automatically choosen (x64 is the default on all
@@ -85,7 +99,5 @@ jobs:
     #  [OPTIONAL] By default the action disables vcpkg's telemetry by defining VCPKG_DISABLE_METRICS.
     #  This behavior can be disabled by defining `VCPKG_ENABLE_METRICS` as follows.
     #  VCPKG_ENABLE_METRICS: 1
-    #
-
 
 
