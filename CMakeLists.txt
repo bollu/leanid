@@ -35,7 +35,8 @@ add_library(elidcore
   src/lib/uri_encode.cpp
   )
 
-find_package(json-c REQUIRED)
+find_package(json-c CONFIG REQUIRED)
+find_package(libuv CONFIG REQUIRED)
 
 target_include_directories(elidcore PUBLIC json-c::json-c)
 target_include_directories(elidcore PUBLIC ssh)
@@ -43,6 +44,7 @@ target_include_directories(elidcore PUBLIC include/)
 target_include_directories(elidcore PUBLIC src/third_party/)
 target_include_directories(elidcore PUBLIC src/third_party/subprocess)
 
+target_link_libraries(elidcore PUBLIC $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
 target_link_libraries(elidcore PUBLIC json-c::json-c)
 # target_link_libraries(elidcore PRIVATE $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
 install(TARGETS elidcore DESTINATION lib)

@@ -1,59 +1,27 @@
-# elIDE: Elegant Metamodal Lean4 Shadertoy IDE
+# elID: Half of a Lean IDE
 
-A [Metamodal](https://en.wikipedia.org/wiki/Metamodernism) IDE for Lean.
-As I broadly see it, there are two kinds of proof assistant editors:
-1. emacs-like (e.g. [Proof General](https://proofgeneral.github.io/)) which exposes
-  an emacs-style interface with many options and keybinds to make things happen.
-2. LSP-like (e.g. VSCode, [lean.nvim](https://github.com/Julian/lean.nvim)), which
-   use the always-on LSP to provide instant, zero interaction feedback.
-
-Both of these leave me just shy of perfectly content. The emacs experience I find
-janky, since it intermingles text editing with proof state management concerns.
-The LSP experience I find unperformant, since the always-on LSP leads to my laptop
-doubling as a great space heater.
-
-The natural conclusion is that a real **modal** proof assistant IDE has not been written.
-This is my Christmas 2023 effort to fill this unfilled niche in the market.
+A tool that looks for the string `@@@` at the given lake project, interprets
+this file as a file of interest and the `@@@` as the current cursor location,
+and prints Lean's infoview and messages for that file.
 
 #### Features
 
 - [x] Modal infoview, hover, goto definition, and lean message list.
-- [x] built-in Ripgrep for fast, fuzzy file and pattern search.
 - [x] Vim keybindings.
 
 #### Brutalist Anti-Features
 
-- No syntax highlighting.
 - Sits in at ~4000 LoC of C/C++.
 
 
 #### Building
 
-Dependencies:
-- json-c
-- SDL2
-- Dear Imgui (bundled)
-
-
-##### Linux
-
-For grabbing `SDL2` and `json-c`, either use your package manager, or use
-`vcpkg` as instructed below:
+First install [`vcpkg` for package management](https://vcpkg.io/en/getting-started.html).
+Next, get a cmake build:
 
 ```cpp
-$ vcpkg install json-c
-$ vcpkg install sdl2
-$ mkdir build && cd build && cmake ../ && make -j4
-```
-
-##### Windows (Command line)
-
-```
-$ vcpkg integrate install
-$ vcpkg install json-c
-$ vcpkg install sdl2
-$ mkdir build && cd build && cmake  -DCMAKE_TOOLCHAIN_FILE=<path/to/vcpkg/cmake/toolchain> ../ && make -j4
-# example toolchain path: -DCMAKE_TOOLCHAIN_FILE=C:/Users/bollu/software/vcpkg/scripts/buildsystems/vcpkg.cmake
+$ cmake -B build -S . --preset debug
+$ cd build && make -j4
 ```
 
 #### References

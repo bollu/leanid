@@ -1,0 +1,6 @@
+{
+  "dependencies": [
+    "libuv",
+    "json-c"
+  ]
+}
