@@ -46,7 +46,7 @@ target_include_directories(elidcore PUBLIC src/third_party/subprocess)
 
 target_link_libraries(elidcore PUBLIC $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
 target_link_libraries(elidcore PUBLIC json-c::json-c)
-# target_link_libraries(elidcore PRIVATE $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
+target_link_libraries(elidcore PRIVATE $<IF:$<TARGET_EXISTS:libuv::uv_a>,libuv::uv_a,libuv::uv>)
 install(TARGETS elidcore DESTINATION lib)
 
 # elid
